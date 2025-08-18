@@ -6,6 +6,8 @@
 [![Stars](https://img.shields.io/github/stars/firework-a/easy-banner?style=flat-square)](https://github.com/firework-a/easy-banner/stargazers)
 [![Go Report](https://goreportcard.com/badge/github.com/firework-a/easy-banner?style=flat-square)](https://goreportcard.com/report/github.com/firework-a/easy-banner)
 
+便捷的为 `Go` 应用添加控制台 `Banner`
+
 终端打印 Banner，支持彩色Banner
 
 ## 特性
@@ -73,7 +75,7 @@ func main() {
 \___/\____/_/ /_/\___/_/    Author: {{.Author}}
 ```
 
-#### 彩色easy-banner
+#### 彩色banner
 ```text
 {{.Bold}}{{.Cyan}}_________  ____  _______{{.Reset}}
 {{.Bold}}{{.Cyan}} / ___/ __ \/ __ \/ ___/ /{{.Reset}}  {{.Green}}Version: {{.Yellow}}{{.Version}}{{.Reset}}
