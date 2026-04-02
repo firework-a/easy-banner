@@ -1,28 +1,163 @@
 # This workflow will build a golang project
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
 
-name: Go
+name: Go CI/CD
 
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ "main" ]
+  release:
+    types: [created]
+
+env:
+  # 设置项目名称和版本变量
+  PROJECT_NAME: "{{ github.event.repository.name }}"
+  BINARY_NAME: "${{ github.event.repository.name }}"
+  GO_VERSION: "1.24"
 
 jobs:
-
-  build:
+  # 构建和测试任务
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
 
+    - name: Detect project structure
+      id: detect
+      run: |
+        # 自动检测主包位置
+        if [ -f "main.go" ]; then
+          echo "BUILD_PATH=." >> "$GITHUB_OUTPUT"
+        elif [ -d "cmd" ]; then
+          # 查找 cmd 目录下的第一个可执行文件
+          MAIN_DIR=$(find cmd -name "main.go" | head -1 | xargs dirname)
+          if [ -n "$MAIN_DIR" ]; then
+            echo "BUILD_PATH=./$MAIN_DIR" >> "$GITHUB_OUTPUT"
+            echo "BINARY_NAME=$(basename $MAIN_DIR)" >> "$GITHUB_OUTPUT"
+          else
+            echo "BUILD_PATH=." >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "BUILD_PATH=." >> "$GITHUB_OUTPUT"
+        fi
+        
+        # 默认二进制名称
+        if [ -z "${{ env.BINARY_NAME }}" ]; then
+          echo "BINARY_NAME=${{ env.PROJECT_NAME }}" >> "$GITHUB_ENV"
+        fi
+
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.24'
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+        cache-dependency-path: go.sum
+
+    - name: Download dependencies
+      run: go mod download
 
     - name: Build
-      run: go build -v ./...
+      run: |
+        echo "Building from: ${{ steps.detect.outputs.BUILD_PATH }}"
+        echo "Binary name: ${{ env.BINARY_NAME }}"
+        go build -v -o ${{ env.BINARY_NAME }} ${{ steps.detect.outputs.BUILD_PATH }}
 
     - name: Test
       run: go test -v ./...
+
+    - name: Upload build artifact
+      if: github.event_name != 'release'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.BINARY_NAME }}-binary
+        path: ${{ env.BINARY_NAME }}
+        retention-days: 7
+
+  # 多平台发布任务
+  release:
+    needs: build-and-test
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Detect project info
+      id: detect-info
+      run: |
+        # 自动检测主包位置和项目信息
+        if [ -f "main.go" ]; then
+          echo "BUILD_PATH=." >> "$GITHUB_OUTPUT"
+          BIN_NAME="${{ env.PROJECT_NAME }}"
+        elif [ -d "cmd" ]; then
+          # 查找 cmd 目录下的可执行文件
+          MAIN_FILES=$(find cmd -name "main.go")
+          if [ -n "$MAIN_FILES" ]; then
+            # 取第一个找到的 main.go
+            FIRST_MAIN=$(echo "$MAIN_FILES" | head -1)
+            DIR_PATH=$(dirname "$FIRST_MAIN")
+            echo "BUILD_PATH=./$DIR_PATH" >> "$GITHUB_OUTPUT"
+            BIN_NAME=$(basename "$DIR_PATH")
+          else
+            echo "BUILD_PATH=." >> "$GITHUB_OUTPUT"
+            BIN_NAME="${{ env.PROJECT_NAME }}"
+          fi
+        else
+          echo "BUILD_PATH=." >> "$GITHUB_OUTPUT"
+          BIN_NAME="${{ env.PROJECT_NAME }}"
+        fi
+        
+        # 获取版本号
+        VERSION="${{ github.ref_name || github.event.release.tag_name || 'dev' }}"
+        echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+        echo "BINARY_NAME=${BIN_NAME}" >> "$GITHUB_ENV"
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build for multiple platforms
+      run: |
+        # 支持的平台列表
+        PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
+        
+        for PLATFORM in $PLATFORMS; do
+          GOOS=${PLATFORM%/*}
+          GOARCH=${PLATFORM#*/}
+          OUTPUT="${BINARY_NAME}-${VERSION}-${GOOS}-${GOARCH}"
+          
+          if [ "$GOOS" = "windows" ]; then
+            OUTPUT="${OUTPUT}.exe"
+          fi
+          
+          echo "Building for $GOOS/$GOARCH..."
+          GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 \
+            go build -v \
+            -ldflags="-s -w -X main.Version=${VERSION}" \
+            -o "$OUTPUT" \
+            ${{ steps.detect-info.outputs.BUILD_PATH }}
+          
+          # 打包
+          if [ "$GOOS" = "windows" ]; then
+            zip -j "${BINARY_NAME}-${VERSION}-${GOOS}-${GOARCH}.zip" "$OUTPUT"
+          else
+            tar -czf "${BINARY_NAME}-${VERSION}-${GOOS}-${GOARCH}.tar.gz" "$OUTPUT"
+          fi
+          
+          # 清理中间文件
+          rm -f "$OUTPUT"
+        done
+
+    - name: Upload release assets
+      if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          ${{ env.BINARY_NAME }}-${{ env.VERSION }}-*.tar.gz
+          ${{ env.BINARY_NAME }}-${{ env.VERSION }}-*.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
